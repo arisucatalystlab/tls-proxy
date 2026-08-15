@@ -135,7 +135,7 @@ curl -x http://localhost:8080 https://example.com/
 
 | Variable | Example | Purpose |
 |---|---|---|
-| `TLS_PROXY_PORT` | `8080` | Listening port |
+| `TLS_PROXY_PORT` | `8080` | Listening port; Vercel's `PORT` is used when unset |
 | `TLS_PROXY_API_KEY` | `secret1,secret2` | Comma-separated API keys. Empty means no auth (not recommended in production) |
 | `TLS_PROXY_DEFAULT_PROFILE` | `chrome_120` | Default fingerprint profile for proxy mode |
 | `TLS_PROXY_DEFAULT_TIMEOUT` | `30` | Request timeout in seconds |
@@ -156,10 +156,14 @@ docker run -d --name tls-proxy -p 8080:8080 \
 
 ## Vercel Setup (Detailed)
 
-`api/index.go` is a Vercel Serverless Function and `vercel.json` configures the
-routes. The `/request` endpoint and `/health` are fully functional on Vercel.
-Standard proxy mode (CONNECT/absolute-form forwarding) is not available on
-serverless functions; use `POST /request` instead.
+Vercel detects `cmd/server/main.go` and runs the full standalone server (the
+same binary used by Docker) behind its edge. The `/request` endpoint and
+`/health` are fully functional. Standard proxy mode (CONNECT/absolute-form
+forwarding) is not available behind Vercel's edge; use `POST /request`
+instead.
+
+The server listens on the `PORT` environment variable (set by Vercel),
+falling back to `TLS_PROXY_PORT`, then `8080`.
 
 ### Deploy with the Vercel CLI
 
@@ -249,7 +253,7 @@ deployed proxy.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TLS_PROXY_PORT` | `8080` | Listening port |
+| `TLS_PROXY_PORT` | `8080` | Listening port; Vercel's `PORT` is used when unset |
 | `TLS_PROXY_API_KEY` | empty | Comma-separated API keys; empty disables auth |
 | `TLS_PROXY_DEFAULT_PROFILE` | `chrome_120` | Default profile for proxy mode |
 | `TLS_PROXY_DEFAULT_TIMEOUT` | `30` | Timeout in seconds |

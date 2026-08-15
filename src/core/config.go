@@ -37,7 +37,7 @@ type ServerConfig struct {
 
 func ConfigFromEnv() ServerConfig {
 	return ServerConfig{
-		Port:            envOr(EnvPort, "8080"),
+		Port:            envOr(EnvPort, envOr("PORT", "8080")),
 		APIKeys:         splitComma(envOr(EnvAPIKey, "")),
 		DefaultProfile:  envOr(EnvDefaultProfile, "chrome_120"),
 		DefaultTimeout:  envIntOr(EnvDefaultTimeout, 30),

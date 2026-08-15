@@ -22,3 +22,5 @@
 
 # Test artifacts
 coverage.out
+.vercel
+.env*
