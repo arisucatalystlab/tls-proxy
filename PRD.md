@@ -1,36 +1,53 @@
 # Product Requirement Document (PRD): TLS-Proxy
 
 ## 1. Executive Summary
-**tls-proxy** adalah layanan HTTP Proxy ringan yang dirancang untuk membypass TLS fingerprinting (seperti JA3/JA4, HTTP/2 frame signatures) dengan memanfaatkan backend `tls-client` dari [bogdanfinn/tls-client](https://github.com/bogdanfinn/tls-client). Service ini dapat bertindak sebagai HTTP Proxy standar maupun API endpoint (`/request`) berbasis payload JSON, serta kompatibel untuk dijalankan di lingkungan Serverless (Vercel, Cloudflare Workers) dan Containerized (Docker).
+**tls-proxy** is a lightweight HTTP proxy service designed to bypass TLS
+fingerprinting (such as JA3/JA4 and HTTP/2 frame signatures) using the
+`tls-client` backend from
+[bogdanfinn/tls-client](https://github.com/bogdanfinn/tls-client). The service
+can act as a standard HTTP proxy or as a JSON payload based API endpoint
+(`/request`), and is compatible with Serverless environments (Vercel,
+Cloudflare Workers) and Containerized environments (Docker).
 
 ---
 
 ## 2. Goals & Key Features
-- **TLS Fingerprint Evasion**: Emulasi browser modern (Chrome, Firefox, Safari) untuk menghindari deteksi bot/TLS fingerprinting.
+- **TLS Fingerprint Evasion**: Emulates modern browsers (Chrome, Firefox,
+  Safari) to avoid bot/TLS fingerprinting detection.
 - **Dual Routing Mode**:
   1. Standard HTTP/HTTPS Proxy Agent.
   2. Dynamic JSON REST API endpoint via `POST /request`.
-- **Multi-Platform Deployment**: Mendukung Vercel, Cloudflare Workers, dan Docker (Linux/Unix container).
-- **Stateless & Serverless-Ready**: Siap dijalankan tanpa ketergantungan database internal.
+- **Multi-Platform Deployment**: Supports Vercel, Cloudflare Workers, and
+  Docker (Linux/Unix container).
+- **Stateless & Serverless-Ready**: Ready to run without any internal database
+  dependency.
 
 ---
 
 ## 3. Architecture & Deployment Targets
 
 ### 3.1 Supported Platforms
-1. **Docker / Self-Hosted**: Dijalankan sebagai Go/CGO binary atau Python/Node wrapper (sesuai binding `tls-client`) dalam container. Support mode Standard HTTP Proxy dan REST API.
-2. **Vercel**: Dijalankan sebagai Serverless Function. API endpoint `/request` berfungsi penuh.
-3. **Cloudflare Workers**: Dijalankan via Wasm / API adapter jika memungkinkan, atau routing proxy ke instance `tls-client` backend.
+1. **Docker / Self-Hosted**: Runs as a Go/CGO binary or a Python/Node wrapper
+   (according to the `tls-client` binding) in a container. Supports both
+   Standard HTTP Proxy and REST API modes.
+2. **Vercel**: Runs as a Serverless Function. The `/request` API endpoint is
+   fully functional.
+3. **Cloudflare Workers**: Runs via a Wasm / API adapter where possible, or by
+   routing the proxy to a `tls-client` backend instance.
 
 ---
 
 ## 4. Functional Requirements
 
 ### 4.1 Mode 1: Standard HTTP Proxy Agent
-Sistem dapat dikonfigurasi sebagai URL proxy biasa (`http://user:pass@proxy-ip:port`) yang menerima request incoming dari HTTP Client standar (misal: `curl`, `requests`, `axios`) dan menyalurkannya via `tls-client`.
+The system can be configured as a regular proxy URL
+(`http://user:pass@proxy-ip:port`) that accepts incoming requests from
+standard HTTP clients (for example `curl`, `requests`, `axios`) and forwards
+them through `tls-client`.
 
 ### 4.2 Mode 2: Custom JSON Endpoint (`POST /request`)
-Endpoint serbaguna yang menerima seluruh parameter HTTP request di dalam request body.
+A general purpose endpoint that accepts all HTTP request parameters in the
+request body.
 
 - **Endpoint**: `POST /request`
 - **Content-Type**: `application/json`
@@ -72,32 +89,36 @@ Response Schema Example:
 ```
 
 ## 5. Non-Functional Requirements
-- Performance: Latensi overhead proxy `< 50ms` (di luar network latency target site).
-- Security: Mendukung opsi Authentication Header / Secret Token (X-API-Key) pada server proxy untuk mencegah penyalahgunaan open-proxy.
-- Logging: Log minimalis tanpa menyimpan data sensitif payload user.
+- Performance: Proxy overhead latency `< 50ms` (excluding the target site's
+  network latency).
+- Security: Supports an Authentication Header / Secret Token option
+  (X-API-Key) on the proxy server to prevent open-proxy abuse.
+- Logging: Minimal logging without storing sensitive user payload data.
 
 ## 6. Project Structure
 ```txt
 tls-proxy/
-├── api/                  # Entrypoint Vercel serverless
+├── api/                  # Vercel serverless entrypoint
 │   └── index.go / index.js
 ├── src/                  # Core logic & tls-client wrapper
-├── worker/               # Entrypoint Cloudflare Workers
+├── worker/               # Cloudflare Workers entrypoint
 ├── Dockerfile            # Container build specification
 ├── docker-compose.yml
-├── vercel.json           # Konfigurasi Vercel
+├── vercel.json           # Vercel configuration
 ├── README.md
 └── PRD.md
 ```
 
 ## 7. Development Milestones
-1. Phase 1: Core Wrapper Integration `github.com/bogdanfinn/tls-client` & Standalone HTTP Server (/request endpoint).
-2. Phase 2: Implementasi Standard HTTP Proxy Agent.
-3. Phase 3: Build Dockerfile & Optimasi Image Size.
-4. Phase 4: Adaptasi ke Vercel Serverless Function & Cloudflare Worker Wrapper.
-
+1. Phase 1: Core Wrapper Integration `github.com/bogdanfinn/tls-client` &
+   Standalone HTTP Server (/request endpoint).
+2. Phase 2: Implement the Standard HTTP Proxy Agent.
+3. Phase 3: Build the Dockerfile & Optimize Image Size.
+4. Phase 4: Adapt to Vercel Serverless Function & Cloudflare Worker Wrapper.
 
 ## Addition
-Lakukan semuanya secara urut, lalu testing aplikasinya secara keseluruhan dan juga dapat berjalan di Dockerfile, buat juga pada .github/workflows untuk building & linting.
+Do everything in order, then test the whole application and make sure it can
+also run in the Dockerfile; also create the `.github/workflows` for building
+and linting.
 
-Jika ada tools yang belum terinstall, silahkan install terlebih dahulu.
+If any required tools are not installed yet, install them first.

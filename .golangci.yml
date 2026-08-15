@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - bodyclose
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        # G706 (log injection) is a false positive for HTTP access logs:
+        # user-controlled values are emitted with %q, which neutralizes CR/LF.
+        - G706
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - tls-proxy

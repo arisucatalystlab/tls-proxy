@@ -8,15 +8,15 @@ services:
       - "8080:8080"
     environment:
       TLS_PROXY_PORT: "8080"
-      # Wajib diisi untuk mencegah open-proxy abuse.
-      # TLS_PROXY_API_KEY: "ganti-dengan-secret"
+      # Required to prevent open-proxy abuse.
+      # TLS_PROXY_API_KEY: "replace-with-a-secret"
       TLS_PROXY_DEFAULT_PROFILE: "chrome_120"
       TLS_PROXY_DEFAULT_TIMEOUT: "30"
       TLS_PROXY_ENABLE_PROXY: "true"
       TLS_PROXY_MAX_BODY_SIZE: "10485760"
       TLS_PROXY_MAX_RESPONSE_SIZE: "20971520"
       TLS_PROXY_LOG_LEVEL: "info"
-      # Opsional: route lewat upstream proxy (http/https/socks5).
+      # Optional: route through an upstream proxy (http/https/socks5).
       # TLS_PROXY_UPSTREAM_PROXY: "http://user:pass@host:port"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]

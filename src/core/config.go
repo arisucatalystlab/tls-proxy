@@ -9,7 +9,7 @@ import (
 
 const (
 	EnvPort            = "TLS_PROXY_PORT"
-	EnvAPIKey          = "TLS_PROXY_API_KEY"
+	EnvAPIKey          = "TLS_PROXY_API_KEY" // #nosec G101 -- env var name, not a credential
 	EnvDefaultProfile  = "TLS_PROXY_DEFAULT_PROFILE"
 	EnvDefaultTimeout  = "TLS_PROXY_DEFAULT_TIMEOUT"
 	EnvMaxBodySize     = "TLS_PROXY_MAX_BODY_SIZE"

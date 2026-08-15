@@ -153,7 +153,7 @@ func logMiddleware(next http.Handler, level string) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		log.Printf("%s %s %d %s remote=%s", r.Method, r.URL.RequestURI(), sw.status, time.Since(start).Round(time.Microsecond), r.RemoteAddr)
+		log.Printf("%s %q %d %s remote=%q", r.Method, r.URL.RequestURI(), sw.status, time.Since(start).Round(time.Microsecond), r.RemoteAddr)
 	})
 }
 

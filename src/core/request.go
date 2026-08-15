@@ -84,7 +84,7 @@ func (h *RequestHandler) execute(p *RequestPayload) (*ResponsePayload, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer fresp.Body.Close()
+	defer func() { _ = fresp.Body.Close() }()
 
 	var sb strings.Builder
 	limited := io.LimitReader(fresp.Body, h.MaxResponseSize)

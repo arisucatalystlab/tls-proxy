@@ -102,7 +102,7 @@ func (p *ProxyHandler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	defer fresp.Body.Close()
+	defer func() { _ = fresp.Body.Close() }()
 
 	for k, vv := range fresp.Header {
 		if isHopByHopHeader(k) {
@@ -132,45 +132,45 @@ func (p *ProxyHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := p.dialTarget(r.Context(), target)
 	if err != nil {
-		log.Printf("CONNECT %s failed: %v", target, err)
+		log.Printf("CONNECT %q failed: %v", target, err)
 		http.Error(w, "tunnel failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		conn.Close()
+		_ = conn.Close()
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
 		return
 	}
 
 	clientConn, buf, err := hj.Hijack()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		http.Error(w, "hijack failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if _, err := buf.WriteString("HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
-		conn.Close()
-		clientConn.Close()
+		_ = conn.Close()
+		_ = clientConn.Close()
 		return
 	}
 	if err := buf.Flush(); err != nil {
-		conn.Close()
-		clientConn.Close()
+		_ = conn.Close()
+		_ = clientConn.Close()
 		return
 	}
 
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(conn, clientConn)
-		conn.Close()
+		_ = conn.Close()
 		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(clientConn, conn)
-		clientConn.Close()
+		_ = clientConn.Close()
 		done <- struct{}{}
 	}()
 	<-done
@@ -225,20 +225,20 @@ func dialViaHTTPProxy(ctx context.Context, dialer *net.Dialer, u *url.URL, targe
 	req += "\r\n"
 
 	if _, err := conn.Write([]byte(req)); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("upstream proxy CONNECT failed: %s", resp.Status)
 	}
 	return conn, nil

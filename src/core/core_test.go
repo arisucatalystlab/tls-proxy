@@ -109,7 +109,7 @@ func fetchPeet(t *testing.T, payload *RequestPayload) (*peetReport, *ResponsePay
 	if err != nil {
 		t.Fatalf("POST /request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 
 	var out ResponsePayload
@@ -211,7 +211,7 @@ func TestRequestHandlerValidation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != c.want {
 				t.Errorf("got %d want %d", resp.StatusCode, c.want)
 			}
@@ -284,7 +284,7 @@ func TestCustomJA3String(t *testing.T) {
 
 // TestCloudflareBypass verifies that requests succeed against a site served
 // behind Cloudflare's edge (and its bot/anti-bot WAF) using a browser TLS
-// fingerprint — the response must be a real 200 with content, not a 403
+// fingerprint: the response must be a real 200 with content, not a 403
 // "Just a moment..." challenge.
 func TestCloudflareBypass(t *testing.T) {
 	if !networkAvailable(t, "tls.peet.ws:443", 5*time.Second) {
@@ -316,7 +316,7 @@ func TestProxyHTTPForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.HTTP.Serve(ln) }()
-	defer srv.HTTP.Close()
+	defer func() { _ = srv.HTTP.Close() }()
 
 	proxyURL := "http://" + ln.Addr().String()
 
@@ -331,7 +331,7 @@ func TestProxyHTTPForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("http via proxy got %d", resp.StatusCode)
 	}
@@ -344,7 +344,7 @@ func TestProxyHTTPSConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.HTTP.Serve(ln) }()
-	defer srv.HTTP.Close()
+	defer func() { _ = srv.HTTP.Close() }()
 
 	proxyURL := "http://" + ln.Addr().String()
 	client := &http.Client{
@@ -358,7 +358,7 @@ func TestProxyHTTPSConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("https (CONNECT) via proxy got %d", resp.StatusCode)
 	}
@@ -371,7 +371,7 @@ func TestServerAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.HTTP.Serve(ln) }()
-	defer srv.HTTP.Close()
+	defer func() { _ = srv.HTTP.Close() }()
 	addr := ln.Addr().String()
 
 	do := func(req *http.Request) *http.Response {
@@ -389,7 +389,7 @@ func TestServerAuth(t *testing.T) {
 	t.Run("request no key", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "http://proxy.invalid/request", strings.NewReader(`{"request":{"url":"https://example.com/"}}`))
 		resp := do(req)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("got %d want 401", resp.StatusCode)
 		}
@@ -399,7 +399,7 @@ func TestServerAuth(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "http://proxy.invalid/request", strings.NewReader(`{"request":{"url":"https://example.com/"}}`))
 		req.Header.Set("X-API-Key", "sekret-42")
 		resp := do(req)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusUnauthorized {
 			t.Error("got 401 with correct key")
 		}
@@ -408,7 +408,7 @@ func TestServerAuth(t *testing.T) {
 	t.Run("proxy no creds", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
 		resp := do(req)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("got %d want 401", resp.StatusCode)
 		}
@@ -418,7 +418,7 @@ func TestServerAuth(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
 		req.Header.Set("Proxy-Authorization", "Basic "+basicAuth("tls-proxy:sekret-42"))
 		resp := do(req)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusUnauthorized {
 			t.Error("got 401 with proxy basic auth")
 		}
