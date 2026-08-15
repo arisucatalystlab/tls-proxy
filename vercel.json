@@ -1,0 +1,20 @@
+{
+  "functions": {
+    "api/index.go": {
+      "runtime": "go1.25",
+      "maxDuration": 30
+    }
+  },
+  "routes": [
+    { "src": "/request", "dest": "/api/index.go" },
+    { "src": "/health", "dest": "/api/index.go" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
+  ]
+}

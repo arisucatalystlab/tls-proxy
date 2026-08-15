@@ -1,0 +1,24 @@
+# Binaries
+/tls-proxy
+*.exe
+*.test
+
+# Go build artifacts
+/dist/
+/out/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Test artifacts
+coverage.out
