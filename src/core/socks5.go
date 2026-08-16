@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -28,6 +29,7 @@ type SOCKS5Proxy struct {
 	Timeout       int
 	UpstreamProxy string
 	APIKeys       []string
+	mu            sync.Mutex
 	listener      net.Listener
 }
 
@@ -44,7 +46,9 @@ func (s *SOCKS5Proxy) Serve(laddr string) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.listener = ln
+	s.mu.Unlock()
 	log.Printf("socks5 proxy listening on %s", ln.Addr())
 	for {
 		conn, err := ln.Accept()
@@ -56,6 +60,8 @@ func (s *SOCKS5Proxy) Serve(laddr string) error {
 }
 
 func (s *SOCKS5Proxy) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.listener != nil {
 		return s.listener.Close()
 	}
@@ -64,6 +70,8 @@ func (s *SOCKS5Proxy) Close() error {
 
 // Addr returns the bound listener address once Serve is running.
 func (s *SOCKS5Proxy) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.listener != nil {
 		return s.listener.Addr()
 	}
