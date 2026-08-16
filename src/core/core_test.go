@@ -653,6 +653,14 @@ func TestServerAuth(t *testing.T) {
 			t.Errorf("got %d want 200", resp.StatusCode)
 		}
 	})
+
+	t.Run("health is public even with key", func(t *testing.T) {
+		resp := do(http.MethodGet, "/health", nil)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("got %d want 200", resp.StatusCode)
+		}
+	})
 }
 
 func bytesEqual(a, b []byte) bool {

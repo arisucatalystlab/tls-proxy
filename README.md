@@ -207,14 +207,70 @@ const res = await axios.get("https://httpbin.org/ip", {
 console.log(res.data);
 ```
 
+#### Python (requests + PySocks)
+
+```python
+import requests
+
+session = requests.Session()
+session.proxies = {
+    "http": "socks5h://tls-proxy:super-secret@103.47.121.7:1080",
+    "https": "socks5h://tls-proxy:super-secret@103.47.121.7:1080",
+}
+print(session.get("https://httpbin.org/ip", timeout=15).json())
+
+# Raw PySocks (routes everything through the SOCKS5 proxy)
+import socks, socket
+socks.set_default_proxy(
+    socks.SOCKS5, "103.47.121.7", 1080,
+    username="tls-proxy", password="super-secret",
+)
+socket.socket = socks.socksocket
+print(requests.get("https://httpbin.org/ip", timeout=15).json())
+```
+
+#### Go (golang.org/x/net/proxy)
+
+```go
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "time"
+
+    "golang.org/x/net/proxy"
+)
+
+func main() {
+    dialer, _ := proxy.SOCKS5("tcp", "103.47.121.7:1080",
+        &proxy.Auth{User: "tls-proxy", Password: "super-secret"}, proxy.Direct)
+    client := &http.Client{
+        Transport: &http.Transport{Dial: dialer.Dial},
+        Timeout:   15 * time.Second,
+    }
+    resp, err := client.Get("https://httpbin.org/ip")
+    if err != nil {
+        panic(err)
+    }
+    defer resp.Body.Close()
+    body, _ := io.ReadAll(resp.Body)
+    var out map[string]string
+    _ = json.Unmarshal(body, &out)
+    fmt.Println(out["origin"])
+}
+```
+
 #### curl
 
 ```bash
 # HTTP proxy (CONNECT / absolute-form)
-curl -x http://103.47.121.7:8080 https://httpbin.org/ip
+curl -x http://tls-proxy:super-secret@103.47.121.7:8080 https://httpbin.org/ip
 
 # SOCKS5 proxy
-curl --socks5 103.47.121.7:1080 https://httpbin.org/ip
+curl -U tls-proxy:super-secret --socks5-hostname 103.47.121.7:1080 https://httpbin.org/ip
 ```
 
 When an API key is set, HTTP proxy requests authenticate with

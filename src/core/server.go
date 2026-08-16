@@ -104,6 +104,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func authMiddleware(next http.Handler, keys []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /health is intentionally public so load balancers and platform
+		// health checks (Docker, Railway, Render, ...) work with an API key.
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if len(keys) == 0 {
 			next.ServeHTTP(w, r)
 			return
