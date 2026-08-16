@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -667,4 +669,278 @@ func bytesEqual(a, b []byte) bool {
 
 func basicAuth(cred string) string {
 	return base64.StdEncoding.EncodeToString([]byte(cred))
+}
+
+func startTestServer(t *testing.T, cfg ServerConfig) (addr string) {
+	t.Helper()
+	srv := NewServer(cfg)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.HTTP.Close() })
+	go func() { _ = srv.HTTP.Serve(ln) }()
+	return ln.Addr().String()
+}
+
+// echoTarget is a plain TCP listener that echoes received bytes back.
+func echoTarget(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				_, _ = io.Copy(c, c)
+			}(conn)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestProxyMode(t *testing.T) {
+	proxyAddr := startTestServer(t, ServerConfig{Port: "0", DefaultTimeout: 30, EnableProxy: true})
+	proxyURL := "http://" + proxyAddr
+
+	t.Run("absolute-form http", func(t *testing.T) {
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "via-proxy:"+r.URL.RequestURI()) // #nosec G705 -- test echo
+
+		}))
+		defer target.Close()
+
+		pu, _ := url.Parse(proxyURL)
+		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu)}}
+		resp, err := client.Get(target.URL + "/ping?a=1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("got %d want 200", resp.StatusCode)
+		}
+		if got := string(body); got != "via-proxy:/ping?a=1" {
+			t.Errorf("unexpected body: %q", got)
+		}
+	})
+
+	t.Run("connect tunnel echo", func(t *testing.T) {
+		target := echoTarget(t)
+		conn, err := net.Dial("tcp", proxyAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		br := bufio.NewReader(conn)
+		status, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(status, "200") {
+			t.Fatalf("CONNECT failed: %q", status)
+		}
+		if _, err := io.ReadFull(br, make([]byte, 2)); err != nil { // consume \r\n
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(conn, "ping-through-tunnel")
+		echo := make([]byte, len("ping-through-tunnel"))
+		if _, err := io.ReadFull(br, echo); err != nil {
+			t.Fatal(err)
+		}
+		if string(echo) != "ping-through-tunnel" {
+			t.Errorf("tunnel data corrupted: %q", echo)
+		}
+	})
+
+	t.Run("disabled returns 404", func(t *testing.T) {
+		disabledAddr := startTestServer(t, ServerConfig{Port: "0", EnableProxy: false})
+		pu, _ := url.Parse("http://" + disabledAddr)
+		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu)}}
+		resp, err := client.Get("http://127.0.0.1:1/x")
+		if err != nil {
+			// Go may surface the non-2xx proxy response as a proxying error.
+			if resp != nil && resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("got %d want 404", resp.StatusCode)
+			}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("got %d want 404", resp.StatusCode)
+		}
+	})
+}
+
+func TestProxyModeAuth(t *testing.T) {
+	proxyAddr := startTestServer(t, ServerConfig{Port: "0", DefaultTimeout: 30, EnableProxy: true, APIKeys: []string{"sekret-42"}})
+	target := echoTarget(t)
+
+	connect := func(authHeaders []string) (*bufio.Reader, error) {
+		conn, err := net.Dial("tcp", proxyAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", target, target)
+		for _, h := range authHeaders {
+			_, _ = io.WriteString(conn, h+"\r\n")
+		}
+		_, _ = io.WriteString(conn, "\r\n")
+		return bufio.NewReader(conn), nil
+	}
+
+	t.Run("rejected without credentials", func(t *testing.T) {
+		br, err := connect(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, _ := br.ReadString('\n')
+		if !strings.Contains(status, "401") {
+			t.Errorf("expected 401, got %q", status)
+		}
+	})
+
+	t.Run("accepted with proxy-authorization", func(t *testing.T) {
+		br, err := connect([]string{"Proxy-Authorization: Basic " + basicAuth("tls-proxy:sekret-42")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, _ := br.ReadString('\n')
+		if !strings.Contains(status, "200") {
+			t.Errorf("expected 200, got %q", status)
+		}
+	})
+}
+
+func TestSOCKS5Proxy(t *testing.T) {
+	sp := NewSOCKS5Proxy(ServerConfig{DefaultTimeout: 30})
+	spErr := make(chan error, 1)
+	go func() { spErr <- sp.Serve("127.0.0.1:0") }()
+	t.Cleanup(func() { _ = sp.Close() })
+
+	var addr string
+	for i := 0; i < 100; i++ {
+		if a := sp.Addr(); a != nil {
+			addr = a.String()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatal("socks5 proxy did not start")
+	}
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, _ = conn.Write([]byte{0x05, 0x01, 0x00}) // version 5, 1 method, no-auth
+	greet := make([]byte, 2)
+	if _, err := io.ReadFull(conn, greet); err != nil {
+		t.Fatal(err)
+	}
+	if !bytesEqual(greet, []byte{0x05, 0x00}) {
+		t.Fatalf("greeting reply = %v", greet)
+	}
+
+	target := echoTarget(t)
+	host, portStr, _ := net.SplitHostPort(target)
+	port, _ := strconv.Atoi(portStr)
+	ip := net.ParseIP(host).To4()
+	req := []byte{0x05, 0x01, 0x00, 0x01}
+	req = append(req, ip...)
+	req = append(req, byte(port>>8), byte(port)) // #nosec G115 -- port is within [0, 65535]
+	_, _ = conn.Write(req)
+
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] != 0x00 {
+		t.Fatalf("socks5 CONNECT failed, rep=0x%02x", reply[1])
+	}
+
+	_, _ = io.WriteString(conn, "socks-ping")
+	echo := make([]byte, len("socks-ping"))
+	if _, err := io.ReadFull(conn, echo); err != nil {
+		t.Fatal(err)
+	}
+	if string(echo) != "socks-ping" {
+		t.Errorf("tunnel data corrupted: %q", echo)
+	}
+}
+
+func TestSOCKS5ProxyAuth(t *testing.T) {
+	sp := NewSOCKS5Proxy(ServerConfig{DefaultTimeout: 30, APIKeys: []string{"sekret-42"}})
+	go func() { _ = sp.Serve("127.0.0.1:0") }()
+	t.Cleanup(func() { _ = sp.Close() })
+
+	var addr string
+	for i := 0; i < 100; i++ {
+		if a := sp.Addr(); a != nil {
+			addr = a.String()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatal("socks5 proxy did not start")
+	}
+
+	t.Run("no-auth rejected when key set", func(t *testing.T) {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x00})
+		reply := make([]byte, 2)
+		_, _ = io.ReadFull(conn, reply)
+		if !bytesEqual(reply, []byte{0x05, 0xff}) {
+			t.Errorf("expected no acceptable methods (0xff), got %v", reply)
+		}
+	})
+
+	t.Run("userpass auth accepted", func(t *testing.T) {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x02}) // offer username/password
+		authReply := make([]byte, 2)
+		if _, err := io.ReadFull(conn, authReply); err != nil {
+			t.Fatal(err)
+		}
+		if !bytesEqual(authReply, []byte{0x05, 0x02}) {
+			t.Fatalf("server did not select userpass auth: %v", authReply)
+		}
+		pass := "sekret-42" // #nosec G101 -- test credential
+		user := "tls-proxy"
+		msg := []byte{0x01, byte(len(user))} // #nosec G115 -- test value
+		msg = append(msg, user...)
+		msg = append(msg, byte(len(pass))) // #nosec G115 -- test value
+		msg = append(msg, pass...)
+		_, _ = conn.Write(msg)
+		status := make([]byte, 2)
+		if _, err := io.ReadFull(conn, status); err != nil {
+			t.Fatal(err)
+		}
+		if status[1] != 0x00 {
+			t.Fatalf("auth failed, status=0x%02x", status[1])
+		}
+	})
 }

@@ -158,6 +158,16 @@ func (h *URLProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = fresp.Body.Close() }()
 
+	writeUpstreamResponse(w, fresp, true)
+}
+
+// writeUpstreamResponse forwards an fhttp response to the client, dropping
+// hop-by-hop headers and stale compression framing, then stamping an accurate
+// Content-Length for buffered responses. When prefixUncommon is true, headers
+// outside the pass-through list are forwarded with an "x-proxy-" prefix (used
+// by /url/*); otherwise all remaining headers are forwarded as-is (used by the
+// HTTP proxy mode).
+func writeUpstreamResponse(w http.ResponseWriter, fresp *fhttp.Response, prefixUncommon bool) {
 	// fhttp transparently decompresses gzip/br/deflate/zstd responses but
 	// leaves the stale Content-Encoding (and sometimes Content-Length) in the
 	// header map. Forwarding those would produce a framing mismatch, so they
@@ -171,7 +181,7 @@ func (h *URLProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, v := range vv {
-			if passThroughHeaders[strings.ToLower(k)] {
+			if !prefixUncommon || passThroughHeaders[strings.ToLower(k)] {
 				w.Header().Add(k, v)
 			} else {
 				w.Header().Add("x-proxy-"+k, v)
@@ -179,17 +189,19 @@ func (h *URLProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// When the upstream length is unknown or the body was decompressed, buffer
-	// up to a limit so we can stamp an accurate Content-Length. Some serverless
-	// runtimes (e.g. Vercel) drop chunked (no Content-Length) responses.
-	// Larger bodies fall back to chunked streaming, which native servers
-	// (Docker, Railway, Heroku, ...) handle correctly.
+	// When the upstream length is known and the body was not decompressed,
+	// stream straight through with the original Content-Length.
 	if !uncompressed && fresp.ContentLength >= 0 {
 		w.WriteHeader(fresp.StatusCode)
 		_, _ = copyStream(w, fresp.Body)
 		return
 	}
 
+	// Otherwise the length is unknown or the body was decompressed: buffer up
+	// to a limit so we can stamp an accurate Content-Length. Some serverless
+	// runtimes (e.g. Vercel) drop chunked (no Content-Length) responses.
+	// Larger bodies fall back to chunked streaming, which native servers
+	// (Docker, Railway, Heroku, ...) handle correctly.
 	data, rerr := io.ReadAll(io.LimitReader(fresp.Body, contentLengthBufferLimit+1))
 	if rerr == nil && int64(len(data)) <= contentLengthBufferLimit && responseAllowsBody(fresp.StatusCode) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))

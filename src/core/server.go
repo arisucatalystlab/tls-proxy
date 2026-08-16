@@ -17,6 +17,7 @@ type Server struct {
 	Config  ServerConfig
 	Factory *ClientFactory
 	HTTP    *http.Server
+	Socks5  *SOCKS5Proxy
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -24,6 +25,7 @@ func NewServer(cfg ServerConfig) *Server {
 
 	requestHandler := NewRequestHandler(factory, cfg.MaxBodySize, cfg.MaxResponseSize)
 	urlHandler := NewURLProxyHandler(factory, cfg)
+	proxyHandler := NewProxyHandler(factory, cfg)
 
 	// Custom router: the embedded target URL in /url/* paths contains "//",
 	// which Go's ServeMux would 301-redirect into a cleaned path. Routing on
@@ -43,6 +45,14 @@ func NewServer(cfg ServerConfig) *Server {
 				"client_identifiers": ids,
 				"count":              len(ids),
 			})
+		case r.Method == http.MethodConnect || (r.URL != nil && r.URL.IsAbs()):
+			// HTTP forward proxy (CONNECT tunnel or absolute-form request),
+			// only when explicitly enabled.
+			if cfg.EnableProxy {
+				proxyHandler.ServeHTTP(w, r)
+				return
+			}
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -70,12 +80,25 @@ func NewHandler(cfg ServerConfig) http.Handler {
 }
 
 func (s *Server) ListenAndServe() error {
+	if s.Config.EnableProxy {
+		// SOCKS5 runs on its own listener; the HTTP forward proxy (CONNECT /
+		// absolute-form) is handled by the HTTP router on the main port.
+		s.Socks5 = NewSOCKS5Proxy(s.Config)
+		go func() {
+			if err := s.Socks5.Serve(s.Config.Socks5Addr); err != nil {
+				log.Printf("socks5 proxy stopped: %v", err)
+			}
+		}()
+	}
 	log.Printf("tls-proxy listening on :%s", s.Config.Port)
 	return s.HTTP.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.Factory.Close()
+	if s.Socks5 != nil {
+		_ = s.Socks5.Close()
+	}
 	return s.HTTP.Shutdown(ctx)
 }
 

@@ -18,6 +18,8 @@ const (
 	EnvReadTimeout     = "TLS_PROXY_READ_TIMEOUT"
 	EnvWriteTimeout    = "TLS_PROXY_WRITE_TIMEOUT"
 	EnvUpstreamProxy   = "TLS_PROXY_UPSTREAM_PROXY"
+	EnvEnableProxy     = "TLS_PROXY_ENABLE_PROXY"
+	EnvSocks5Addr      = "TLS_PROXY_SOCKS5_ADDR"
 )
 
 type ServerConfig struct {
@@ -31,6 +33,12 @@ type ServerConfig struct {
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	UpstreamProxy   string
+	// EnableProxy turns on the HTTP and SOCKS5 forward proxies. Disabled by
+	// default so serverless platforms (e.g. Vercel) do not expose an open
+	// proxy.
+	EnableProxy bool
+	// Socks5Addr is the listen address for the SOCKS5 proxy.
+	Socks5Addr string
 }
 
 func ConfigFromEnv() ServerConfig {
@@ -45,6 +53,8 @@ func ConfigFromEnv() ServerConfig {
 		ReadTimeout:     time.Duration(envInt64Or(EnvReadTimeout, 30)) * time.Second,
 		WriteTimeout:    time.Duration(envInt64Or(EnvWriteTimeout, 60)) * time.Second,
 		UpstreamProxy:   envOr(EnvUpstreamProxy, ""),
+		EnableProxy:     envBoolOr(EnvEnableProxy, false),
+		Socks5Addr:      envOr(EnvSocks5Addr, ":1080"),
 	}
 }
 
@@ -68,6 +78,15 @@ func envInt64Or(key string, def int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envBoolOr(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(strings.ToLower(v)); err == nil {
+			return b
 		}
 	}
 	return def

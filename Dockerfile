@@ -26,8 +26,10 @@ COPY --from=builder /out/tls-proxy /usr/local/bin/tls-proxy
 USER tlsproxy
 
 ENV TLS_PROXY_PORT=8080 \
-    TLS_PROXY_LOG_LEVEL=info
+    TLS_PROXY_LOG_LEVEL=info \
+    TLS_PROXY_ENABLE_PROXY=true \
+    TLS_PROXY_SOCKS5_ADDR=:1080
 
-EXPOSE 8080
+EXPOSE 8080 1080
 
 ENTRYPOINT ["/usr/local/bin/tls-proxy"]

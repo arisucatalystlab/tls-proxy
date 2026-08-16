@@ -4,9 +4,10 @@ A lightweight HTTP service designed to bypass TLS fingerprinting (JA3/JA4,
 HTTP/2 frame signatures) using the
 [`github.com/bogdanfinn/tls-client`](https://github.com/bogdanfinn/tls-client)
 backend. It exposes a streaming reverse proxy (`/url/*`), a JSON REST API
-(`POST /request`), a health check (`/health`), and a fingerprint catalog
-(`/list-fingerprint`). It runs on Vercel Serverless and on any platform that
-can run a container image (Railway, Heroku, Render, Fly.io, and more).
+(`POST /request`), a health check (`/health`), a fingerprint catalog
+(`/list-fingerprint`), and an optional HTTP + SOCKS5 forward proxy. It runs
+on Vercel Serverless and on any platform that can run a container image
+(Railway, Heroku, Render, Fly.io, and more).
 
 ## Features
 
@@ -25,8 +26,13 @@ can run a container image (Railway, Heroku, Render, Fly.io, and more).
   `client_identifier` values
 - **Upstream proxy**: route through another proxy (http/https/socks5), e.g.
   a residential proxy
+- **Forward proxy (HTTP + SOCKS5, opt-in)**: standard HTTP forward proxy
+  (absolute-form + CONNECT) and a SOCKS5 proxy so existing HTTP clients
+  (axios `proxy: { host, port }`) and SOCKS5 clients
+  (`socks-proxy-agent`) can use tls-proxy as a drop-in proxy. Disabled by
+  default; enabled in the Docker image
 - **Auth**: `X-API-Key` on all endpoints; `Proxy-Authorization: Basic` (or
-  `Authorization`) is also accepted on `/url/*`
+  `Authorization`) is also accepted on `/url/*` and the proxy routes
 - **Stateless and serverless-ready**: no internal database required
 
 ## Endpoints
@@ -60,7 +66,8 @@ The CI pipeline publishes an image to GHCR on every push to `main`:
 ```bash
 docker pull ghcr.io/arisucatalystlab/tls-proxy:latest
 
-docker run -d --name tls-proxy -p 8080:8080 \
+# 8080 = HTTP API + HTTP forward proxy, 1080 = SOCKS5 proxy
+docker run -d --name tls-proxy -p 8080:8080 -p 1080:1080 \
   -e TLS_PROXY_API_KEY=secret \
   ghcr.io/arisucatalystlab/tls-proxy:latest
 ```
@@ -152,6 +159,83 @@ curl http://localhost:8080/list-fingerprint
 }
 ```
 
+### 7. Forward proxy (HTTP + SOCKS5, opt-in)
+
+The Docker image ships with the forward proxy **enabled**: an HTTP forward
+proxy on the main port (`8080`) and a SOCKS5 proxy on port `1080`. Outside
+Docker it is **disabled by default** (serverless-safe) and can be turned on
+with `TLS_PROXY_ENABLE_PROXY=true`.
+
+```bash
+docker run -d --name tls-proxy -p 8080:8080 -p 1080:1080 \
+  -e TLS_PROXY_API_KEY=super-secret \
+  ghcr.io/arisucatalystlab/tls-proxy:latest
+```
+
+#### axios (HTTP proxy)
+
+Point axios at the server IP with `proxy: { host, port }`:
+
+```js
+import axios from "axios";
+
+const res = await axios.get("https://httpbin.org/ip", {
+  proxy: {
+    host: "103.47.121.7", // your production IP (the Docker host)
+    port: 8080,           // TLS_PROXY_PORT
+    auth: { username: "tls-proxy", password: process.env.TLS_PROXY_API_KEY },
+  },
+  timeout: 10000,
+});
+console.log(res.data);
+```
+
+If no API key is set, the `auth` field can be omitted.
+
+#### axios + socks-proxy-agent (SOCKS5)
+
+```js
+import axios from "axios";
+import { SocksProxyAgent } from "socks-proxy-agent";
+
+const agent = new SocksProxyAgent("socks5://tls-proxy:super-secret@103.47.121.7:1080");
+
+const res = await axios.get("https://httpbin.org/ip", {
+  httpsAgent: agent,
+  timeout: 10000,
+});
+console.log(res.data);
+```
+
+#### curl
+
+```bash
+# HTTP proxy (CONNECT / absolute-form)
+curl -x http://103.47.121.7:8080 https://httpbin.org/ip
+
+# SOCKS5 proxy
+curl --socks5 103.47.121.7:1080 https://httpbin.org/ip
+```
+
+When an API key is set, HTTP proxy requests authenticate with
+`Proxy-Authorization: Basic` (`username: tls-proxy`) and SOCKS5 with
+username/password (password = API key).
+
+#### Upstream proxy
+
+The forward proxy's outbound leg can route through another proxy, including a
+SOCKS5 proxy (e.g. a residential SOCKS5 line), via
+`TLS_PROXY_UPSTREAM_PROXY=socks5://user:pass@host:port`:
+
+```bash
+docker run -d --name tls-proxy -p 8080:8080 -p 1080:1080 \
+  -e TLS_PROXY_API_KEY=super-secret \
+  -e TLS_PROXY_UPSTREAM_PROXY=socks5://user:pass@residential.example.com:1080 \
+  ghcr.io/arisucatalystlab/tls-proxy:latest
+```
+
+The same upstream proxy also applies to `/url/*` and `/request`.
+
 ## Client Examples
 
 ### Node.js / axios
@@ -178,8 +262,10 @@ file.data.pipe(fs.createWriteStream("image.png"));
 ```
 
 Note: `encodeURIComponent` is recommended for targets containing reserved
-characters; the raw URL (e.g. `/url/https://example.com/image.png`) also works
-for simple targets.
+characters. On Vercel the target URL **must** be percent-encoded
+(e.g. `/url/https%3A%2F%2Fexample.com%2F`); the raw
+`/url/https://example.com/` form is only supported on full-container
+platforms.
 
 ### Python (requests)
 
@@ -284,11 +370,11 @@ file_put_contents("image.png", $data);
 # Build locally
 docker build -t arisucatalystlab/tls-proxy:latest .
 
-# Run with default settings
-docker run -d --name tls-proxy -p 8080:8080 arisucatalystlab/tls-proxy:latest
+# Run with default settings (HTTP proxy + SOCKS5 proxy enabled in the image)
+docker run -d --name tls-proxy -p 8080:8080 -p 1080:1080 arisucatalystlab/tls-proxy:latest
 
 # Run with an API key (required in production to avoid open-proxy abuse)
-docker run -d --name tls-proxy -p 8080:8080 \
+docker run -d --name tls-proxy -p 8080:8080 -p 1080:1080 \
   -e TLS_PROXY_API_KEY=super-secret \
   arisucatalystlab/tls-proxy:latest
 ```
@@ -338,7 +424,7 @@ curl http://localhost:8080/url/https://example.com/
 Example with an upstream residential proxy:
 
 ```bash
-docker run -d --name tls-proxy -p 8080:8080 \
+docker run -d --name tls-proxy -p 8080:8080 -p 1080:1080 \
   -e TLS_PROXY_API_KEY=super-secret \
   -e TLS_PROXY_UPSTREAM_PROXY=http://user:pass@residential.example.com:8080 \
   arisucatalystlab/tls-proxy:latest
@@ -348,9 +434,10 @@ docker run -d --name tls-proxy -p 8080:8080 \
 
 Vercel detects `cmd/server/main.go` and runs the full standalone server (the
 same binary used by Docker) behind its edge. `/request`, `/health`,
-`/list-fingerprint`, and `/url/*` are all fully functional. Raw TCP tunnels
-(CONNECT) are not available behind Vercel's edge, but `/url/*` provides the
-same streaming proxy capability over plain HTTP.
+`/list-fingerprint`, and `/url/*` are all fully functional. The forward
+proxy (HTTP CONNECT / SOCKS5) is **disabled by default** and cannot be
+enabled on serverless, so use `/url/*` for the same streaming proxy
+capability over plain HTTP.
 
 The server listens on the `PORT` environment variable (set by Vercel),
 falling back to `TLS_PROXY_PORT`, then `8080`.
@@ -463,14 +550,9 @@ flyctl secrets set TLS_PROXY_API_KEY=secret
 Any container platform (Koyeb, Google Cloud Run, Azure Container Apps,
 DigitalOcean App Platform, Amazon ECS/EKS, Kubernetes, a plain VPS with
 Docker, ...) works the same way: run `ghcr.io/arisucatalystlab/tls-proxy` with
-`$PORT` and your env vars.
-
-### Netlify
-
-Netlify is **not supported**. Netlify Functions run on an older Go toolchain
-(below the Go 1.24+ required by the `tls-client` dependency) and enforce
-function execution timeouts, so neither the server nor streaming responses
-work there. Use any of the container platforms above instead.
+`$PORT` and your env vars. The Docker image enables the HTTP + SOCKS5
+forward proxy by default, so existing HTTP clients (axios, curl, wget, ...)
+and SOCKS5 clients can connect straight to the deployed host.
 
 ## Environment Variables (Reference)
 
@@ -483,6 +565,8 @@ work there. Use any of the container platforms above instead.
 | `TLS_PROXY_MAX_BODY_SIZE` | `10485760` | Max request body size (bytes) |
 | `TLS_PROXY_MAX_RESPONSE_SIZE` | `20971520` | Max buffered response size (bytes) |
 | `TLS_PROXY_UPSTREAM_PROXY` | empty | Upstream proxy `http(s)://...` or `socks5://...` |
+| `TLS_PROXY_ENABLE_PROXY` | `false` | Enables the HTTP forward proxy and the SOCKS5 proxy (the Docker image sets `true`) |
+| `TLS_PROXY_SOCKS5_ADDR` | `:1080` | SOCKS5 proxy listen address |
 | `TLS_PROXY_LOG_LEVEL` | `info` | `info` or `none` |
 
 ### Available Client Identifiers
@@ -518,6 +602,8 @@ The test suite covers:
 - **Fingerprint catalog**: `/list-fingerprint` returns a non-empty sorted
   list including `chrome_120` and `firefox_148`
 - **Auth**: `X-API-Key` on all endpoints and basic auth on `/url/*`
+- **Forward proxy**: HTTP absolute-form + CONNECT tunneling and SOCKS5
+  (CONNECT, username/password auth), disabled-by-default behavior
 
 Network tests run as-is in CI and skip automatically when offline.
 
