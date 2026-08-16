@@ -104,9 +104,13 @@ func (h *RequestHandler) execute(p *RequestPayload) (*ResponsePayload, error) {
 
 	headers := make(map[string]string, len(fresp.Header))
 	for k, v := range fresp.Header {
-		if len(v) > 0 {
-			headers[k] = v[0]
+		if len(v) == 0 {
+			continue
 		}
+		if fresp.Uncompressed && strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
+		headers[k] = v[0]
 	}
 
 	cookies := make(map[string]string)

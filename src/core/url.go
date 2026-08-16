@@ -1,10 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -156,8 +158,16 @@ func (h *URLProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = fresp.Body.Close() }()
 
+	// fhttp transparently decompresses gzip/br/deflate/zstd responses but
+	// leaves the stale Content-Encoding (and sometimes Content-Length) in the
+	// header map. Forwarding those would produce a framing mismatch, so they
+	// are dropped when the body was already decompressed.
+	uncompressed := fresp.Uncompressed
 	for k, vv := range fresp.Header {
 		if isHopByHopHeader(k) {
+			continue
+		}
+		if uncompressed && (strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Content-Length")) {
 			continue
 		}
 		for _, v := range vv {
@@ -168,8 +178,36 @@ func (h *URLProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// When the upstream length is unknown or the body was decompressed, buffer
+	// up to a limit so we can stamp an accurate Content-Length. Some serverless
+	// runtimes (e.g. Vercel) drop chunked (no Content-Length) responses.
+	// Larger bodies fall back to chunked streaming, which native servers
+	// (Docker, Railway, Heroku, ...) handle correctly.
+	if !uncompressed && fresp.ContentLength >= 0 {
+		w.WriteHeader(fresp.StatusCode)
+		_, _ = copyStream(w, fresp.Body)
+		return
+	}
+
+	data, rerr := io.ReadAll(io.LimitReader(fresp.Body, contentLengthBufferLimit+1))
+	if rerr == nil && int64(len(data)) <= contentLengthBufferLimit && responseAllowsBody(fresp.StatusCode) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.WriteHeader(fresp.StatusCode)
+		_, _ = w.Write(data)
+		return
+	}
+
 	w.WriteHeader(fresp.StatusCode)
-	_, _ = copyStream(w, fresp.Body)
+	_, _ = copyStream(w, io.MultiReader(bytes.NewReader(data), fresp.Body))
+}
+
+// contentLengthBufferLimit bounds how much of a response is buffered to stamp
+// an accurate Content-Length. Responses beyond this limit are streamed.
+const contentLengthBufferLimit = 32 << 20
+
+func responseAllowsBody(status int) bool {
+	return status >= 200 && status != http.StatusNoContent && status != http.StatusNotModified
 }
 
 // targetFromRequest extracts the embedded target URL from a /url/* request,
