@@ -22,35 +22,30 @@ type Server struct {
 func NewServer(cfg ServerConfig) *Server {
 	factory := NewClientFactory()
 
-	mux := http.NewServeMux()
-
-	var proxyHandler http.Handler
-	if cfg.EnableProxy {
-		proxyHandler = &ProxyHandler{Factory: factory, Timeout: cfg.DefaultTimeout, UpstreamProxy: cfg.UpstreamProxy, MaxBodySize: cfg.MaxBodySize}
-		mux.Handle("/", proxyHandler)
-	}
-
 	requestHandler := NewRequestHandler(factory, cfg.MaxBodySize, cfg.MaxResponseSize)
-	mux.HandleFunc("/request", requestHandler.ServeHTTP)
-	mux.HandleFunc("/request/", requestHandler.ServeHTTP)
+	urlHandler := NewURLProxyHandler(factory, cfg)
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	// CONNECT must be intercepted before the mux: Go's ServeMux 301-redirects
-	// requests whose URL path is empty, which breaks HTTPS tunneling.
+	// Custom router: the embedded target URL in /url/* paths contains "//",
+	// which Go's ServeMux would 301-redirect into a cleaned path. Routing on
+	// the raw path preserves targets like /url/https://example.com/.
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodConnect {
-			if proxyHandler == nil {
-				http.Error(w, "CONNECT not supported", http.StatusMethodNotAllowed)
-				return
-			}
-			proxyHandler.ServeHTTP(w, r)
-			return
+		switch {
+		case r.URL.Path == "/request" || r.URL.Path == "/request/":
+			requestHandler.ServeHTTP(w, r)
+		case strings.HasPrefix(r.URL.Path, "/url/"):
+			urlHandler.ServeHTTP(w, r)
+		case r.URL.Path == "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.URL.Path == "/list-fingerprint":
+			ids := ListFingerprints()
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"client_identifiers": ids,
+				"count":              len(ids),
+			})
+		default:
+			http.NotFound(w, r)
 		}
-		mux.ServeHTTP(w, r)
 	})
 	handler = logMiddleware(handler, cfg.LogLevel)
 	handler = authMiddleware(handler, cfg.APIKeys)
@@ -75,7 +70,7 @@ func NewHandler(cfg ServerConfig) http.Handler {
 }
 
 func (s *Server) ListenAndServe() error {
-	log.Printf("tls-proxy listening on :%s (proxy=%v)", s.Config.Port, s.Config.EnableProxy)
+	log.Printf("tls-proxy listening on :%s", s.Config.Port)
 	return s.HTTP.ListenAndServe()
 }
 
@@ -173,4 +168,10 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, errors.New("underlying ResponseWriter does not support hijacking")
 	}
 	return hj.Hijack()
+}
+
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

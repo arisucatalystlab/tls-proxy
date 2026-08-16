@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -9,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -309,8 +309,28 @@ func TestCloudflareBypass(t *testing.T) {
 	}
 }
 
-func TestProxyHTTPForwarding(t *testing.T) {
-	srv := NewServer(ServerConfig{Port: "0", EnableProxy: true, DefaultTimeout: 30})
+func TestURLProxyStreaming(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/binary":
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Length", "4")
+			w.Header().Set("X-Format-Google", "Abcd")
+			_, _ = w.Write([]byte{0x89, 0x50, 0x4e, 0x47})
+		default:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Echo-URL", r.URL.RequestURI())
+			w.Header().Set("X-Method", r.Method)
+			if v := r.Header.Get("X-Extra-Header"); v != "" {
+				w.Header().Set("X-Extra-Header", v)
+			}
+			body, _ := io.ReadAll(r.Body)
+			_, _ = w.Write(body)
+		}
+	}))
+	defer target.Close()
+
+	srv := NewServer(ServerConfig{Port: "0", DefaultTimeout: 30})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -318,27 +338,141 @@ func TestProxyHTTPForwarding(t *testing.T) {
 	go func() { _ = srv.HTTP.Serve(ln) }()
 	defer func() { _ = srv.HTTP.Close() }()
 
-	proxyURL := "http://" + ln.Addr().String()
+	base := "http://" + ln.Addr().String() + "/url/"
 
-	client := &http.Client{
-		Transport: &http.Transport{Proxy: func(*http.Request) (*url.URL, error) {
-			return url.Parse(proxyURL)
-		}},
-		Timeout: 30 * time.Second,
-	}
+	t.Run("binary passthrough with header prefix", func(t *testing.T) {
+		resp, err := http.Get(base + target.URL + "/binary")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("got %d want 200", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+			t.Errorf("content-type not passed through: %q", ct)
+		}
+		if v := resp.Header.Get("X-Proxy-X-Format-Google"); v != "Abcd" {
+			t.Errorf("expected prefixed x-proxy-x-format-google=Abcd, got %q", v)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !bytesEqual(body, []byte{0x89, 0x50, 0x4e, 0x47}) {
+			t.Errorf("binary body corrupted: %v", body)
+		}
+	})
 
-	resp, err := client.Get("http://example.com/")
+	t.Run("method body and query forwarded", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, base+target.URL+"/echo?a=1&b=2", strings.NewReader(`{"hello":"world"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Extra-Header", "custom-value")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("got %d want 200", resp.StatusCode)
+		}
+		if v := resp.Header.Get("X-Proxy-X-Method"); v != "POST" {
+			t.Errorf("method not forwarded: %q", v)
+		}
+		if v := resp.Header.Get("X-Proxy-X-Extra-Header"); v != "custom-value" {
+			t.Errorf("custom header not forwarded: %q", v)
+		}
+		if v := resp.Header.Get("X-Proxy-X-Echo-URL"); v != "/echo?a=1&b=2" {
+			t.Errorf("query not forwarded: %q", v)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != `{"hello":"world"}` {
+			t.Errorf("body not forwarded: %q", body)
+		}
+	})
+
+	t.Run("auth headers stripped", func(t *testing.T) {
+		target2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got := r.Header.Get("X-API-Key")
+			w.Header().Set("X-Saw-Key", got)
+			_, _ = w.Write([]byte("ok"))
+		}))
+		defer target2.Close()
+		req, _ := http.NewRequest(http.MethodGet, base+target2.URL+"/", nil)
+		req.Header.Set("X-API-Key", "sekret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if v := resp.Header.Get("X-Proxy-X-Saw-Key"); v != "" {
+			t.Errorf("x-api-key leaked upstream: %q", v)
+		}
+	})
+}
+
+// newRawTarget starts a plain TCP listener that captures the first request it
+// receives byte-for-byte and replies 200. Strict servers (e.g. Cloudflare)
+// reject malformed framing that Go's own server silently accepts, so raw
+// capture is the only way to assert on it.
+func newRawTarget(t *testing.T) (addr string, got chan []byte) {
+	t.Helper()
+	got = make(chan []byte, 1)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("http via proxy got %d", resp.StatusCode)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			got <- nil
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var data []byte
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := conn.Read(buf)
+			if n > 0 {
+				data = append(data, buf[:n]...)
+			}
+			if rerr != nil {
+				break
+			}
+			if hdrEnd := bytes.Index(data, []byte("\r\n\r\n")); hdrEnd >= 0 {
+				cl := 0
+				for _, line := range strings.Split(string(data[:hdrEnd]), "\r\n") {
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[0]), "content-length") {
+						cl, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+					}
+				}
+				if len(data) >= hdrEnd+4+cl {
+					break
+				}
+			}
+			if len(data) > 1<<20 {
+				break
+			}
+		}
+		got <- data
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+	}()
+	return ln.Addr().String(), got
+}
+
+func assertSingleContentLength(t *testing.T, name string, got []byte) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s: upstream connection failed", name)
+	}
+	if c := bytes.Count(bytes.ToLower(got), []byte("content-length")); c != 1 {
+		t.Errorf("%s: expected exactly one Content-Length header upstream, got %d: %q", name, c, got)
 	}
 }
 
-func TestProxyHTTPSConnect(t *testing.T) {
-	srv := NewServer(ServerConfig{Port: "0", EnableProxy: true, DefaultTimeout: 30})
+func TestURLProxySingleContentLength(t *testing.T) {
+	target, raw := newRawTarget(t)
+
+	srv := NewServer(ServerConfig{Port: "0", DefaultTimeout: 30})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -346,40 +480,124 @@ func TestProxyHTTPSConnect(t *testing.T) {
 	go func() { _ = srv.HTTP.Serve(ln) }()
 	defer func() { _ = srv.HTTP.Close() }()
 
-	proxyURL := "http://" + ln.Addr().String()
-	client := &http.Client{
-		Transport: &http.Transport{Proxy: func(*http.Request) (*url.URL, error) {
-			return url.Parse(proxyURL)
-		}},
-		Timeout: 30 * time.Second,
+	req, _ := http.NewRequest(http.MethodPost,
+		"http://"+ln.Addr().String()+"/url/http://"+target+"/x",
+		strings.NewReader(`{"msg":"world"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
+	_ = resp.Body.Close()
 
-	resp, err := client.Get("https://example.com/")
+	assertSingleContentLength(t, "/url/*", <-raw)
+}
+
+func TestRequestHandlerSingleContentLength(t *testing.T) {
+	target, raw := newRawTarget(t)
+
+	srv := NewServer(ServerConfig{Port: "0", DefaultTimeout: 30})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.HTTP.Serve(ln) }()
+	defer func() { _ = srv.HTTP.Close() }()
+
+	body := `{"tls_config":{"client_identifier":"chrome_120"},"request":{"url":"http://` + target + `/x","method":"POST","headers":{"Content-Type":"application/json"},"body":"{\"msg\":\"world\"}"}}`
+	resp, err := http.Post("http://"+ln.Addr().String()+"/request", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	assertSingleContentLength(t, "/request", <-raw)
+}
+
+func TestURLProxyValidation(t *testing.T) {
+	srv := NewServer(ServerConfig{Port: "0"})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.HTTP.Serve(ln) }()
+	defer func() { _ = srv.HTTP.Close() }()
+	addr := "http://" + ln.Addr().String()
+
+	cases := []string{
+		"/url/",
+		"/url/not-a-url",
+		"/url/ftp://example.com/",
+		"/url/",
+	}
+	for _, path := range cases {
+		resp, err := http.Get(addr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%q got %d want 400", path, resp.StatusCode)
+		}
+	}
+}
+
+func TestListFingerprint(t *testing.T) {
+	srv := NewServer(ServerConfig{Port: "0"})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.HTTP.Serve(ln) }()
+	defer func() { _ = srv.HTTP.Close() }()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/list-fingerprint")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("https (CONNECT) via proxy got %d", resp.StatusCode)
+		t.Fatalf("got %d want 200", resp.StatusCode)
+	}
+	var out struct {
+		ClientIdentifiers []string `json:"client_identifiers"`
+		Count             int      `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != len(out.ClientIdentifiers) || out.Count == 0 {
+		t.Errorf("bad listing: count=%d len=%d", out.Count, len(out.ClientIdentifiers))
+	}
+	seen := map[string]bool{}
+	for _, id := range out.ClientIdentifiers {
+		seen[id] = true
+	}
+	if !seen["chrome_120"] || !seen["firefox_148"] {
+		t.Errorf("expected chrome_120 and firefox_148 in listing, got %v", out.ClientIdentifiers)
 	}
 }
 
 func TestServerAuth(t *testing.T) {
-	srv := NewServer(ServerConfig{Port: "0", EnableProxy: true, APIKeys: []string{"sekret-42"}})
+	srv := NewServer(ServerConfig{Port: "0", APIKeys: []string{"sekret-42"}})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.HTTP.Serve(ln) }()
 	defer func() { _ = srv.HTTP.Close() }()
-	addr := ln.Addr().String()
+	addr := "http://" + ln.Addr().String()
 
-	do := func(req *http.Request) *http.Response {
+	do := func(method, path string, headers map[string]string) *http.Response {
 		t.Helper()
-		client := &http.Client{Transport: &http.Transport{Proxy: func(*http.Request) (*url.URL, error) {
-			return url.Parse("http://" + addr)
-		}}, Timeout: 20 * time.Second}
-		resp, err := client.Do(req)
+		req, err := http.NewRequest(method, addr+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -387,8 +605,7 @@ func TestServerAuth(t *testing.T) {
 	}
 
 	t.Run("request no key", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodPost, "http://proxy.invalid/request", strings.NewReader(`{"request":{"url":"https://example.com/"}}`))
-		resp := do(req)
+		resp := do(http.MethodPost, "/request", nil)
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("got %d want 401", resp.StatusCode)
@@ -396,33 +613,56 @@ func TestServerAuth(t *testing.T) {
 	})
 
 	t.Run("request with key", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodPost, "http://proxy.invalid/request", strings.NewReader(`{"request":{"url":"https://example.com/"}}`))
-		req.Header.Set("X-API-Key", "sekret-42")
-		resp := do(req)
+		resp := do(http.MethodPost, "/request", map[string]string{"X-API-Key": "sekret-42"})
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusUnauthorized {
 			t.Error("got 401 with correct key")
 		}
 	})
 
-	t.Run("proxy no creds", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
-		resp := do(req)
+	t.Run("url no key", func(t *testing.T) {
+		resp := do(http.MethodGet, "/url/http://example.com/", nil)
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("got %d want 401", resp.StatusCode)
 		}
 	})
 
-	t.Run("proxy basic auth", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
-		req.Header.Set("Proxy-Authorization", "Basic "+basicAuth("tls-proxy:sekret-42"))
-		resp := do(req)
+	t.Run("url with key", func(t *testing.T) {
+		resp := do(http.MethodGet, "/url/http://127.0.0.1:1/x", map[string]string{"X-API-Key": "sekret-42"})
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusUnauthorized {
-			t.Error("got 401 with proxy basic auth")
+			t.Error("got 401 with correct key")
 		}
 	})
+
+	t.Run("url basic auth", func(t *testing.T) {
+		resp := do(http.MethodGet, "/url/http://127.0.0.1:1/x", map[string]string{"Proxy-Authorization": "Basic " + basicAuth("tls-proxy:sekret-42")})
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Error("got 401 with basic auth")
+		}
+	})
+
+	t.Run("list-fingerprint with key", func(t *testing.T) {
+		resp := do(http.MethodGet, "/list-fingerprint", map[string]string{"X-API-Key": "sekret-42"})
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("got %d want 200", resp.StatusCode)
+		}
+	})
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func basicAuth(cred string) string {

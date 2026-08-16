@@ -26,7 +26,6 @@ COPY --from=builder /out/tls-proxy /usr/local/bin/tls-proxy
 USER tlsproxy
 
 ENV TLS_PROXY_PORT=8080 \
-    TLS_PROXY_ENABLE_PROXY=true \
     TLS_PROXY_LOG_LEVEL=info
 
 EXPOSE 8080

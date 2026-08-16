@@ -12,7 +12,6 @@ services:
       # TLS_PROXY_API_KEY: "replace-with-a-secret"
       TLS_PROXY_DEFAULT_PROFILE: "chrome_120"
       TLS_PROXY_DEFAULT_TIMEOUT: "30"
-      TLS_PROXY_ENABLE_PROXY: "true"
       TLS_PROXY_MAX_BODY_SIZE: "10485760"
       TLS_PROXY_MAX_RESPONSE_SIZE: "20971520"
       TLS_PROXY_LOG_LEVEL: "info"

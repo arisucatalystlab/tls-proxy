@@ -1,26 +1,42 @@
 # tls-proxy
 
-A lightweight HTTP proxy service designed to bypass TLS fingerprinting
-(JA3/JA4, HTTP/2 frame signatures) using the
+A lightweight HTTP service designed to bypass TLS fingerprinting (JA3/JA4,
+HTTP/2 frame signatures) using the
 [`github.com/bogdanfinn/tls-client`](https://github.com/bogdanfinn/tls-client)
-backend. It can act as a standard HTTP/HTTPS proxy or as a JSON REST API
-(`POST /request`), and is ready to run on Docker, Vercel Serverless, and
-Cloudflare Workers (as an adapter).
+backend. It exposes a streaming reverse proxy (`/url/*`), a JSON REST API
+(`POST /request`), a health check (`/health`), and a fingerprint catalog
+(`/list-fingerprint`). It runs on Vercel Serverless and on any platform that
+can run a container image (Railway, Heroku, Render, Fly.io, and more).
 
 ## Features
 
 - **Modern browser TLS emulation**: Chrome, Firefox, Safari, Opera, okhttp,
   and more (via `client_identifier`)
 - **Custom JA3 string**: manually specify a particular TLS fingerprint
-- **Dual mode**:
-  1. Standard HTTP/HTTPS proxy agent (absolute-form forwarding plus
-     `CONNECT` tunnel)
-  2. REST API `POST /request` with a JSON payload
+- **Streaming reverse proxy (`/url/*`)**: the target URL is embedded in the
+  path; the incoming method, headers, and body are forwarded as-is using a
+  browser TLS fingerprint. The response is streamed back (binary-safe:
+  images, video, downloads, SSE). Standard entity headers pass through
+  unchanged and every other response header is exposed under an `x-proxy-`
+  prefix
+- **REST API (`POST /request`)**: JSON payload API with string bodies and
+  full response as JSON
+- **Fingerprint catalog (`/list-fingerprint`)**: list all available
+  `client_identifier` values
 - **Upstream proxy**: route through another proxy (http/https/socks5), e.g.
   a residential proxy
-- **Auth**: `X-API-Key` for the API, `Proxy-Authorization: Basic` for proxy
-  mode
+- **Auth**: `X-API-Key` on all endpoints; `Proxy-Authorization: Basic` (or
+  `Authorization`) is also accepted on `/url/*`
 - **Stateless and serverless-ready**: no internal database required
+
+## Endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check, returns `{"status":"ok"}` |
+| `/list-fingerprint` | GET | Lists all available `client_identifier` values |
+| `/request` | POST | JSON payload API (string body, JSON response) |
+| `/url/<target>` | any | Streaming reverse proxy (binary-safe) |
 
 ## Quick Start
 
@@ -37,7 +53,58 @@ TLS_PROXY_API_KEY=secret ./tls-proxy
 docker compose up -d --build
 ```
 
-### 3. REST API (`POST /request`)
+### 3. GitHub Container Registry (GHCR)
+
+The CI pipeline publishes an image to GHCR on every push to `main`:
+
+```bash
+docker pull ghcr.io/arisucatalystlab/tls-proxy:latest
+
+docker run -d --name tls-proxy -p 8080:8080 \
+  -e TLS_PROXY_API_KEY=secret \
+  ghcr.io/arisucatalystlab/tls-proxy:latest
+```
+
+If the package is private, log in first with a token that has
+`read:packages` (or `write:packages` to also publish):
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <username> --password-stdin
+```
+
+### 4. Streaming reverse proxy (`/url/*`)
+
+The target URL is embedded directly in the path, so no proxy configuration is
+needed on the client:
+
+```bash
+# Fetch a page with a Chrome TLS fingerprint
+curl http://localhost:8080/url/https://example.com/
+
+# Download a binary file (streamed, byte-for-byte)
+curl -o image.png http://localhost:8080/url/https://example.com/image.png
+
+# POST JSON to an API, method/body/headers forwarded as-is
+curl -X POST http://localhost:8080/url/https://api.example.com/v1/upload \
+  -H "Content-Type: application/json" \
+  -d '{"name": "photo.jpg"}'
+
+# Custom method and query string
+curl -X PUT "http://localhost:8080/url/https://api.example.com/items/1?a=1&b=2"
+```
+
+Response headers: standard entity headers (`Content-Type`, `Content-Length`,
+`Content-Disposition`, `Content-Range`, `Accept-Ranges`, `Content-Encoding`,
+`ETag`, `Last-Modified`, `Cache-Control`, `Date`, `Vary`, `Location`, `Set-Cookie`,
+...) pass through unchanged so binary rendering and range requests keep
+working. Every other response header is prefixed with `x-proxy-`. For
+example, if the target returns `X-Format-Google: Abcd`, the client sees:
+
+```http
+x-proxy-x-format-google: Abcd
+```
+
+### 5. JSON REST API (`POST /request`)
 
 ```bash
 curl -X POST http://localhost:8080/request \
@@ -72,17 +139,141 @@ Response:
 }
 ```
 
-### 4. Standard HTTP/HTTPS Proxy
+### 6. List available fingerprints
 
 ```bash
-# HTTP
-curl -x http://localhost:8080 http://example.com/
+curl http://localhost:8080/list-fingerprint
+```
 
-# HTTPS (uses a CONNECT tunnel automatically)
-curl -x http://localhost:8080 https://example.com/
+```json
+{
+  "client_identifiers": ["chrome_103", "...", "chrome_120", "...", "firefox_148", "..."],
+  "count": 42
+}
+```
 
-# With auth
-curl -x http://tls-proxy:secret@localhost:8080 https://example.com/
+## Client Examples
+
+### Node.js / axios
+
+```js
+// /request: string JSON API
+const res = await axios.post(
+  "https://tls-proxy.example.com/request",
+  {
+    tls_config: { client_identifier: "chrome_120" },
+    request: { url: "https://api.example.com/v1/data", method: "GET" },
+  },
+  { headers: { "x-api-key": process.env.TLS_PROXY_API_KEY } }
+);
+console.log(res.data.body);
+
+// /url/*: streaming/binary proxy (download a file)
+const target = encodeURIComponent("https://example.com/image.png");
+const file = await axios.get(
+  `https://tls-proxy.example.com/url/${target}`,
+  { responseType: "stream" }
+);
+file.data.pipe(fs.createWriteStream("image.png"));
+```
+
+Note: `encodeURIComponent` is recommended for targets containing reserved
+characters; the raw URL (e.g. `/url/https://example.com/image.png`) also works
+for simple targets.
+
+### Python (requests)
+
+```python
+import requests
+
+base = "https://tls-proxy.example.com"
+headers = {"x-api-key": "secret"}
+
+# /request: string JSON API
+resp = requests.post(
+    f"{base}/request",
+    headers={**headers, "content-type": "application/json"},
+    json={
+        "tls_config": {"client_identifier": "firefox_148"},
+        "request": {"url": "https://example.com/", "method": "GET"},
+    },
+)
+print(resp.json()["body"])
+
+# /url/*: streaming/binary proxy (download a file)
+with requests.get(f"{base}/url/https://example.com/image.png",
+                  headers=headers, stream=True) as r:
+    with open("image.png", "wb") as f:
+        for chunk in r.iter_content(chunk_size=65536):
+            f.write(chunk)
+```
+
+### Go
+
+```go
+// /request: string JSON API
+payload := []byte(`{"tls_config":{"client_identifier":"chrome_120"},"request":{"url":"https://example.com/","method":"GET"}}`)
+req, _ := http.NewRequest(http.MethodPost, "https://tls-proxy.example.com/request", bytes.NewReader(payload))
+req.Header.Set("Content-Type", "application/json")
+req.Header.Set("X-API-Key", "secret")
+resp, err := http.DefaultClient.Do(req)
+
+// /url/*: streaming/binary proxy
+req, _ = http.NewRequest(http.MethodGet, "https://tls-proxy.example.com/url/https://example.com/image.png", nil)
+resp, err = http.DefaultClient.Do(req)
+data, _ := io.ReadAll(resp.Body) // or copy to a file
+```
+
+### Rust (reqwest)
+
+```rust
+// /request: string JSON API
+let res = reqwest::Client::new()
+    .post("https://tls-proxy.example.com/request")
+    .header("x-api-key", "secret")
+    .json(&serde_json::json!({
+        "tls_config": {"client_identifier": "chrome_120"},
+        "request": {"url": "https://example.com/", "method": "GET"}
+    }))
+    .send().await?;
+
+// /url/*: streaming/binary proxy
+let bytes = reqwest::Client::new()
+    .get("https://tls-proxy.example.com/url/https://example.com/image.png")
+    .header("x-api-key", "secret")
+    .send().await?
+    .bytes().await?;
+```
+
+### PHP (cURL)
+
+```php
+<?php
+$base = "https://tls-proxy.example.com";
+$apiKey = "secret";
+
+// /request: string JSON API
+$ch = curl_init("$base/request");
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => ["Content-Type: application/json", "X-API-Key: $apiKey"],
+    CURLOPT_POSTFIELDS => json_encode([
+        "tls_config" => ["client_identifier" => "chrome_120"],
+        "request" => ["url" => "https://example.com/", "method" => "GET"],
+    ]),
+]);
+$resp = json_decode(curl_exec($ch), true);
+echo $resp["body"];
+
+// /url/*: streaming/binary proxy (download a file)
+$ch = curl_init("$base/url/https://example.com/image.png");
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => ["X-API-Key: $apiKey"],
+]);
+$data = curl_exec($ch);
+file_put_contents("image.png", $data);
 ```
 
 ## Docker Usage (Detailed)
@@ -125,10 +316,10 @@ curl -X POST http://localhost:8080/request \
   -d '{"tls_config":{"client_identifier":"firefox_148"},"request":{"url":"https://tls.peet.ws/api/all","method":"GET"}}'
 ```
 
-Use it as a standard proxy from any HTTP client:
+Fetch a URL through the streaming proxy:
 
 ```bash
-curl -x http://localhost:8080 https://example.com/
+curl http://localhost:8080/url/https://example.com/
 ```
 
 ### Passing environment variables
@@ -137,9 +328,8 @@ curl -x http://localhost:8080 https://example.com/
 |---|---|---|
 | `TLS_PROXY_PORT` | `8080` | Listening port; Vercel's `PORT` is used when unset |
 | `TLS_PROXY_API_KEY` | `secret1,secret2` | Comma-separated API keys. Empty means no auth (not recommended in production) |
-| `TLS_PROXY_DEFAULT_PROFILE` | `chrome_120` | Default fingerprint profile for proxy mode |
+| `TLS_PROXY_DEFAULT_PROFILE` | `chrome_120` | Default fingerprint profile used by `/url/*` |
 | `TLS_PROXY_DEFAULT_TIMEOUT` | `30` | Request timeout in seconds |
-| `TLS_PROXY_ENABLE_PROXY` | `true` | Enable standard proxy mode |
 | `TLS_PROXY_MAX_BODY_SIZE` | `10485760` | Maximum request body size in bytes |
 | `TLS_PROXY_MAX_RESPONSE_SIZE` | `20971520` | Maximum buffered response size in bytes |
 | `TLS_PROXY_UPSTREAM_PROXY` | `http://user:pass@host:port` | Route through an upstream proxy (http/https/socks5) |
@@ -157,10 +347,10 @@ docker run -d --name tls-proxy -p 8080:8080 \
 ## Vercel Setup (Detailed)
 
 Vercel detects `cmd/server/main.go` and runs the full standalone server (the
-same binary used by Docker) behind its edge. The `/request` endpoint and
-`/health` are fully functional. Standard proxy mode (CONNECT/absolute-form
-forwarding) is not available behind Vercel's edge; use `POST /request`
-instead.
+same binary used by Docker) behind its edge. `/request`, `/health`,
+`/list-fingerprint`, and `/url/*` are all fully functional. Raw TCP tunnels
+(CONNECT) are not available behind Vercel's edge, but `/url/*` provides the
+same streaming proxy capability over plain HTTP.
 
 The server listens on the `PORT` environment variable (set by Vercel),
 falling back to `TLS_PROXY_PORT`, then `8080`.
@@ -199,55 +389,88 @@ curl -X POST https://<your-project>.vercel.app/request \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <your-key>" \
   -d '{"tls_config":{"client_identifier":"chrome_120"},"request":{"url":"https://example.com/","method":"GET"}}'
+
+# Streaming proxy
+curl https://<your-project>.vercel.app/url/https://example.com/
+
+# Fingerprint catalog
+curl https://<your-project>.vercel.app/list-fingerprint
 ```
 
-## Cloudflare Workers Setup (Detailed)
+## Deploy on Other Platforms (Railway, Heroku, Render, Fly.io, and more)
 
-Go with tls-client cannot run inside Cloudflare's runtime, so `worker/index.js`
-is a thin routing adapter. It forwards requests to a self-hosted tls-proxy
-backend (Docker, Vercel, or any other host).
+The CI pipeline publishes a container image to GHCR
+(`ghcr.io/arisucatalystlab/tls-proxy`) on every push to `main`. Any platform
+that can run a container and inject a `PORT` environment variable can host the
+full server (all endpoints including the streaming `/url/*` proxy).
 
-### 1. Deploy the worker
+All config is done through environment variables (see the
+[reference](#environment-variables-reference)); no platform-specific code is
+required.
+
+### Railway
 
 ```bash
-# Requires wrangler
-npm i -g wrangler
-
-# Login
-wrangler login
-
-# Deploy
-wrangler deploy
+# In the Railway dashboard: New Project -> Deploy from Docker image
+# Image:      ghcr.io/arisucatalystlab/tls-proxy:latest
+# Railway injects $PORT automatically.
+# Add TLS_PROXY_API_KEY to keep the service private.
 ```
 
-### 2. Configure the backend URL
+### Heroku
 
-Set the `TLS_PROXY_BACKEND` secret to your self-hosted tls-proxy instance and
-optionally `TLS_PROXY_API_KEY`:
+Deploy the GHCR image via the Heroku Container Registry:
 
 ```bash
-wrangler secret put TLS_PROXY_BACKEND
-# Enter: https://tls-proxy.example.com
+heroku login
+heroku apps:create tls-proxy-example
+heroku container:login
+docker pull ghcr.io/arisucatalystlab/tls-proxy:latest
+docker tag ghcr.io/arisucatalystlab/tls-proxy:latest registry.heroku.com/tls-proxy-example/web
+docker push registry.heroku.com/tls-proxy-example/web
+heroku container:release web --app tls-proxy-example
 
-wrangler secret put TLS_PROXY_API_KEY
-# Enter: your-api-key (optional)
+# Set configuration
+heroku config:set TLS_PROXY_API_KEY=secret --app tls-proxy-example
+
+# Heroku injects $PORT automatically.
 ```
 
-### 3. Route traffic through the worker
+The Go buildpack path also works: push the repo to Heroku and it builds
+`cmd/server` from `go.mod` (requires Go 1.24+; see the
+[`Procfile`](Procfile)).
+
+### Render
+
+Use the `render.yaml` blueprint in this repository (or the dashboard):
 
 ```bash
-# Forward a /request payload to the backend
-curl -X POST https://<worker>.workers.dev/request \
-  -H "Content-Type: application/json" \
-  -d '{"tls_config":{"client_identifier":"chrome_120"},"request":{"url":"https://example.com/","method":"GET"}}'
-
-# Health check
-curl https://<worker>.workers.dev/health
+# New Web Service -> Deploy from Docker image
+# Image: ghcr.io/arisucatalystlab/tls-proxy:latest
+# Render injects $PORT automatically.
 ```
 
-Requests that are not `/request` or `/health` are relayed to the backend with
-the same path and query string, so the worker can sit in front of your
-deployed proxy.
+### Fly.io
+
+```bash
+flyctl launch --image ghcr.io/arisucatalystlab/tls-proxy:latest
+flyctl secrets set TLS_PROXY_API_KEY=secret
+# Fly.io injects $PORT automatically.
+```
+
+### Other platforms
+
+Any container platform (Koyeb, Google Cloud Run, Azure Container Apps,
+DigitalOcean App Platform, Amazon ECS/EKS, Kubernetes, a plain VPS with
+Docker, ...) works the same way: run `ghcr.io/arisucatalystlab/tls-proxy` with
+`$PORT` and your env vars.
+
+### Netlify
+
+Netlify is **not supported**. Netlify Functions run on an older Go toolchain
+(below the Go 1.24+ required by the `tls-client` dependency) and enforce
+function execution timeouts, so neither the server nor streaming responses
+work there. Use any of the container platforms above instead.
 
 ## Environment Variables (Reference)
 
@@ -255,9 +478,8 @@ deployed proxy.
 |---|---|---|
 | `TLS_PROXY_PORT` | `8080` | Listening port; Vercel's `PORT` is used when unset |
 | `TLS_PROXY_API_KEY` | empty | Comma-separated API keys; empty disables auth |
-| `TLS_PROXY_DEFAULT_PROFILE` | `chrome_120` | Default profile for proxy mode |
+| `TLS_PROXY_DEFAULT_PROFILE` | `chrome_120` | Default profile used by `/url/*` |
 | `TLS_PROXY_DEFAULT_TIMEOUT` | `30` | Timeout in seconds |
-| `TLS_PROXY_ENABLE_PROXY` | `true` | Enable standard proxy mode |
 | `TLS_PROXY_MAX_BODY_SIZE` | `10485760` | Max request body size (bytes) |
 | `TLS_PROXY_MAX_RESPONSE_SIZE` | `20971520` | Max buffered response size (bytes) |
 | `TLS_PROXY_UPSTREAM_PROXY` | empty | Upstream proxy `http(s)://...` or `socks5://...` |
@@ -269,7 +491,12 @@ deployed proxy.
 `safari_16_0`, `safari_ios_17_0`, `opera_89` to `opera_91`,
 `okhttp4_android_*`, and more. See the full list in
 `profiles.MappedTLSClients`
-([tls-client/profiles](https://github.com/bogdanfinn/tls-client/tree/master/profiles)).
+([tls-client/profiles](https://github.com/bogdanfinn/tls-client/tree/master/profiles))
+or query the live service:
+
+```bash
+curl http://localhost:8080/list-fingerprint
+```
 
 ## Testing
 
@@ -285,8 +512,12 @@ The test suite covers:
 - **Cloudflare / anti-bot WAF bypass**: requests return a real 200, not a
   403 challenge
 - **Custom `ja3_string`**
-- **Standard proxy**: HTTP forwarding and HTTPS CONNECT tunnel
-- **Auth**: `X-API-Key` and `Proxy-Authorization`
+- **Streaming proxy (`/url/*`)**: binary passthrough, method/header/body and
+  query forwarding, `x-proxy-` header prefixing, auth header stripping,
+  target validation
+- **Fingerprint catalog**: `/list-fingerprint` returns a non-empty sorted
+  list including `chrome_120` and `firefox_148`
+- **Auth**: `X-API-Key` on all endpoints and basic auth on `/url/*`
 
 Network tests run as-is in CI and skip automatically when offline.
 
@@ -296,12 +527,13 @@ Network tests run as-is in CI and skip automatically when offline.
 tls-proxy/
 ├── api/                   # Vercel serverless entrypoint (api/index.go)
 ├── cmd/server/            # Standalone binary entrypoint
-├── src/core/              # Core logic: client, request handler, proxy, server
-├── worker/                # Cloudflare Workers adapter
+├── src/core/              # Core logic: client, request handler, url proxy, server
 ├── Dockerfile
 ├── docker-compose.yml
+├── Procfile               # Heroku (Go buildpack) process definition
+├── render.yaml            # Render blueprint
 ├── vercel.json
-├── .github/workflows/     # CI: lint, build, test, docker
+├── .github/workflows/     # CI: lint, build, test, docker, GHCR publish
 ├── README.md
 └── PRD.md
 ```

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 
@@ -74,6 +75,17 @@ func ResolveProfile(identifier, ja3 string) (profiles.ClientProfile, error) {
 		return p, nil
 	}
 	return profiles.ClientProfile{}, fmt.Errorf("%w: %s", ErrUnknownProfile, identifier)
+}
+
+// ListFingerprints returns the sorted identifiers of all built-in TLS client
+// profiles, used by the /list-fingerprint endpoint.
+func ListFingerprints() []string {
+	keys := make([]string, 0, len(profiles.MappedTLSClients))
+	for k := range profiles.MappedTLSClients {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func buildJA3Profile(ja3 string) (profiles.ClientProfile, error) {
@@ -241,9 +253,6 @@ func buildFHTTPRequest(p *RequestPayload) (*fhttp.Request, error) {
 	if p.Request.Body != "" {
 		req.Body = io.NopCloser(strings.NewReader(p.Request.Body))
 		req.ContentLength = int64(len(p.Request.Body))
-		if _, ok := p.Request.Headers["Content-Length"]; !ok {
-			req.Header.Set("Content-Length", fmt.Sprintf("%d", len(p.Request.Body)))
-		}
 	}
 
 	q := req.URL.Query()

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: tls-proxy
+    runtime: image
+    image:
+      url: ghcr.io/arisucatalystlab/tls-proxy:latest
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: TLS_PROXY_API_KEY
+        sync: false
+      - key: TLS_PROXY_LOG_LEVEL
+        value: info

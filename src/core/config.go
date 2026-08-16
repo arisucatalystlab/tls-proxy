@@ -14,7 +14,6 @@ const (
 	EnvDefaultTimeout  = "TLS_PROXY_DEFAULT_TIMEOUT"
 	EnvMaxBodySize     = "TLS_PROXY_MAX_BODY_SIZE"
 	EnvMaxResponseSize = "TLS_PROXY_MAX_RESPONSE_SIZE"
-	EnvEnableProxy     = "TLS_PROXY_ENABLE_PROXY"
 	EnvLogLevel        = "TLS_PROXY_LOG_LEVEL"
 	EnvReadTimeout     = "TLS_PROXY_READ_TIMEOUT"
 	EnvWriteTimeout    = "TLS_PROXY_WRITE_TIMEOUT"
@@ -28,7 +27,6 @@ type ServerConfig struct {
 	DefaultTimeout  int
 	MaxBodySize     int64
 	MaxResponseSize int64
-	EnableProxy     bool
 	LogLevel        string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -43,7 +41,6 @@ func ConfigFromEnv() ServerConfig {
 		DefaultTimeout:  envIntOr(EnvDefaultTimeout, 30),
 		MaxBodySize:     envInt64Or(EnvMaxBodySize, 10*1024*1024),
 		MaxResponseSize: envInt64Or(EnvMaxResponseSize, 20*1024*1024),
-		EnableProxy:     envBoolOr(EnvEnableProxy, true),
 		LogLevel:        envOr(EnvLogLevel, "info"),
 		ReadTimeout:     time.Duration(envInt64Or(EnvReadTimeout, 30)) * time.Second,
 		WriteTimeout:    time.Duration(envInt64Or(EnvWriteTimeout, 60)) * time.Second,
@@ -71,15 +68,6 @@ func envInt64Or(key string, def int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
-		}
-	}
-	return def
-}
-
-func envBoolOr(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
 		}
 	}
 	return def
